@@ -4,7 +4,7 @@ import org.springframework.util.concurrent.ListenableFuture;
 
 import java.util.concurrent.TimeUnit;
 
-public interface ExecutorBatch {
+public interface ExecutorBatch extends ListenableFuture<Integer> {
     /**
      * @param key
      * @param task
