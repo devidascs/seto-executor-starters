@@ -44,6 +44,10 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
     private static final String TASK_EXECUTION_MAP = "sequential-executor.{0}.taskExecutionMap";
     private static final String TASK_SUBMIT_TIMEOUT = "sequential-executor.{0}.taskSubmitTimeout";
 
+    public SequentialExecutorServiceImpl(String name, int threadPoolSize) {
+        this(name, threadPoolSize, DEFAULT_MAX_QUEUE_SIZE, true);
+    }
+
     public SequentialExecutorServiceImpl(
             String name,
             int threadPoolSize, int maxKeyQueueSize, boolean blockOnQueueFull) {
