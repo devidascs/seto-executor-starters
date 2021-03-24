@@ -111,7 +111,9 @@ public class ThrottledExecutorImpl<T> implements ThrottledExecutor<T> {
      */
     public int getThrottleCount() {
         synchronized (throttleMap) {
-            return throttleMap.size();
+            int size = throttleMap.size();
+            return size;
         }
+
     }
 }

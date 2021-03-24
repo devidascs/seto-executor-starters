@@ -13,7 +13,10 @@ import java.util.concurrent.TimeoutException;
  * Created by $3T0 Corp<br/>
  * User: devid<br/>
  * Date and Time: 3/4/2021 5:26 PM<br/>
- * <p> Description of ExecutorBatchImpl </p>
+ * <p> ExecutorBatch
+ * Use the executor to execute tasks from one or more batches and use this Future's get API to wait for completion of this batch.
+ * Execution begins immediately, does not wait for all tasks to be added to the batch.
+ * Batch level throttling may be applied so that low priority tasks are not dropped unnecessarily.</p>
  */
 @Slf4j
 public class ExecutorBatchImpl extends CompoundFuture implements ExecutorBatch {

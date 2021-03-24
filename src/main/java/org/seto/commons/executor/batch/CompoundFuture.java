@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Created by $3T0 Corp<br/>
  * User: devid<br/>
  * Date and Time: 3/22/2021 10:32 AM<br/>
- * <p> Description of CompoundFuture </p>
+ * <p> Aggregate a batch of futures into a single future that returns the numbers that has not yet completed </p>
  */
 @Slf4j
 public class CompoundFuture implements ListenableFuture<Integer> {
@@ -36,18 +36,6 @@ public class CompoundFuture implements ListenableFuture<Integer> {
     @Override
     public CompletableFuture<Integer> completable() {
         return null;
-    }
-
-    @Override
-    public void addCallback(ListenableFutureCallback<? super Integer> listenableFutureCallback) {
-        this.successCallback = listenableFutureCallback;
-        this.failureCallback = listenableFutureCallback;
-    }
-
-    @Override
-    public void addCallback(SuccessCallback<? super Integer> successCallback, FailureCallback failureCallback) {
-        this.successCallback = successCallback;
-        this.failureCallback = failureCallback;
     }
 
     @Override
@@ -138,4 +126,18 @@ public class CompoundFuture implements ListenableFuture<Integer> {
             future.addCallback(this);
         }
     }
+
+    @Override
+    public void addCallback(ListenableFutureCallback<? super Integer> listenableFutureCallback) {
+        this.successCallback = listenableFutureCallback;
+        this.failureCallback = listenableFutureCallback;
+    }
+
+    @Override
+    public void addCallback(SuccessCallback<? super Integer> successCallback, FailureCallback failureCallback) {
+        this.successCallback = successCallback;
+        this.failureCallback = failureCallback;
+    }
+
+
 }
