@@ -35,6 +35,36 @@ public class ExecutorBatchImpl extends CompoundFuture implements ExecutorBatch {
     }
 
     @Override
+    public long getElapsedTimeMS() {
+        return System.currentTimeMillis() - batchCreateTimeMs;
+    }
+
+    @Override
+    public String getId() {
+        return id;
+    }
+
+    @Override
+    public ExecutorBatch setName(String name) {
+        this.name = name;
+        return this;
+    }
+
+    @Override
+    public ExecutorBatch setBatchSize(long batchSizeExpected) {
+        this.batchSizeExpected = batchSizeExpected > 0 ? batchSizeExpected : 1;
+        return this;
+    }
+
+    @Override
+    public ExecutorBatch setBatchThrottleFreeDuration(int duration, TimeUnit unit) {
+        if (duration > 0) {
+            this.batchThrottleFreeSubmitTimeMs = unit.toMillis(duration);
+        }
+        return this;
+    }
+
+    @Override
     public ListenableFuture<Object> execute(String key, Runnable task) {
         ListenableFuture<Object> future = executor.execute(key, task);
         super.add(future);
@@ -73,40 +103,16 @@ public class ExecutorBatchImpl extends CompoundFuture implements ExecutorBatch {
     }
 
     @Override
-    public String getId() {
-        return id;
-    }
-
-    @Override
-    public ExecutorBatch setName(String name) {
-        this.name = name;
-        return this;
-    }
-
-    @Override
-    public ExecutorBatch setBatchSize(long batchSizeExpected) {
-        this.batchSizeExpected = batchSizeExpected > 0 ? batchSizeExpected : 1;
-        return this;
-    }
-
-    @Override
-    public ExecutorBatch setThrottleFreeDuration(int duration, TimeUnit unit) {
-        if (duration > 0) {
-            this.batchThrottleFreeSubmitTimeMs = unit.toMillis(duration);
-        }
-        return this;
-    }
-
-    @Override
     /**
      * Wait for completion while logging progress
      * @return the number of remaining tasks. Zero for success
      * @throws InterruptedException
-     * @throws java.util.concurrent.ExecutionException Any task that throws @{@link Error} unblokcs the wait and
+     * @throws java.util.concurrent.ExecutionException Any task that throws @{@link Error} unblocks the wait and
      * the client may chose to terminate the app
      *
      */
-    public int waitForComplete(long timeout, TimeUnit unit) {
+    public int waitForComplete(long timeout, TimeUnit unit)
+            throws TimeoutException, InterruptedException, ExecutionException {
         long timeoutMs = unit.toMillis(timeout);
         long timeoutSnapshotMS = timeoutMs / 4;
         int incompleteTaskCount = 1;
@@ -116,17 +122,21 @@ public class ExecutorBatchImpl extends CompoundFuture implements ExecutorBatch {
                 incompleteTaskCount = get(timeoutSnapshotMS, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 log.warn("waitForComplete: InterruptedException remaining:{} on {}", incompleteTaskCount, this);
+                throw e;
             } catch (ExecutionException e) {
                 log.warn("waitForComplete: ExecutionException remaining:{} on {}", incompleteTaskCount, this);
+                throw e;
             } catch (TimeoutException e) {
                 log.warn("waitForComplete: TimeoutException remaining:{} on {}", incompleteTaskCount, this);
+                throw e;
             }
             if (incompleteTaskCount > 0) {
                 log.info("waited:{} ms to complete {} tasks in batch:{} executor:{}",
-                        waitIntervals + timeoutSnapshotMS, incompleteTaskCount, this, this.executor);
+                        waitIntervals * timeoutSnapshotMS, incompleteTaskCount, this, executor);
             }
             if (executor.isShutDown()) {
                 log.warn("Stopping unreliably with {} incomplete tasks on:{}", incompleteTaskCount, this);
+                break;
             }
         }
         if (incompleteTaskCount > 0) {
@@ -136,10 +146,6 @@ public class ExecutorBatchImpl extends CompoundFuture implements ExecutorBatch {
         return incompleteTaskCount;
     }
 
-    @Override
-    public long getElapsedTimeMS() {
-        return System.currentTimeMillis() - batchCreateTimeMs;
-    }
 
     @Override
     public String toString() {

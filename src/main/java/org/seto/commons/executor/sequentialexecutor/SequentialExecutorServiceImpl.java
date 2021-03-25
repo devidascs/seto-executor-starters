@@ -35,7 +35,7 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
     private final List<Long> threadIds;
     private final ScheduledExecutorService scheduledExec;
     private final ExecutorService backingExecutor;
-    private final SequentialExecutor sequentialExecutor;
+    private final SequentialExecutor seqExecutor;
     private final String name;
     private final boolean blockOnQueueFull;
     private volatile boolean isRunning = true;
@@ -48,16 +48,26 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
         this(name, threadPoolSize, DEFAULT_MAX_QUEUE_SIZE, true);
     }
 
+    /**
+     *
+     * @param name: name of the executor
+     * @param threadPoolSize: total number of threads
+     * @param maxKeyQueueSize: max queued tasks per key
+     * @param blockOnQueueFull: block client thread adding new task if too many tasks are awaiting execution
+     */
     public SequentialExecutorServiceImpl(
             String name,
             int threadPoolSize, int maxKeyQueueSize, boolean blockOnQueueFull) {
+        log.info("SequentialExecutorServiceImpl() called with: name = [" + name + "], threadPoolSize = [" +
+                threadPoolSize + "], maxKeyQueueSize = [" + maxKeyQueueSize + "], blockOnQueueFull = [" +
+                blockOnQueueFull + "]");
         this.threadPoolSize = threadPoolSize;
         this.maxKeyQueueSize = maxKeyQueueSize;
         this.maxMainQueueSize = maxKeyQueueSize * 1;
         this.name = name;
         this.blockOnQueueFull = blockOnQueueFull;
         this.taskQueue = new LinkedBlockingDeque<>();
-        this.sequentialExecutor = new SequentialExecutor();
+        this.seqExecutor = new SequentialExecutor();
         this.threadGroup = new ThreadGroup(name);
 
         AtomicInteger threadIndex = new AtomicInteger(0);
@@ -70,7 +80,7 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
         });
 
         for (int i = 0; i < threadPoolSize; i++) {
-            backingExecutor.execute(sequentialExecutor);
+            backingExecutor.execute(seqExecutor);
         }
         scheduledExec = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, name + "-sched"));
         scheduledExec.scheduleWithFixedDelay(this::auditThreads, 1, 1, TimeUnit.MINUTES);
@@ -78,7 +88,7 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
 
     @Override
     public ScheduledFuture<ListenableFuture<Object>> schedule(String key, Runnable task, int delay, TimeUnit unit) {
-        log.debug("{} schedule:{} delay:{}", name, key, delay);
+        log.debug("{} schedule: key{} delay:{}", name, key, delay);
         if (delay > 0) {
             return scheduledExec.schedule(() -> execute(key, task), delay, unit);
         } else {
@@ -119,7 +129,7 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
                                 seqTask.getKey(), submitTimeoutMs, taskQueue.size());
                         return seqTask;
                     }
-                    submitTimeRemaining = waitTimeMs;
+                    submitTimeRemaining -= waitTimeMs;
                     //Apply back-pressure by blocking the client-thread(too low a value will cause contention with worker threads)
                     taskQueue.wait(waitTimeMs);
                     log.info("{} throttle complete on taskQueue.size:{} on key:{}", name, taskQueue.size(),
@@ -219,7 +229,7 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
                     //Risk non-sequential execution to resolve 'orphaned' queue that has lost its thread
                     log.error("{} waitUntilComplete failed - resubmit key:{} tasks:{}", name, key,
                             queue.size());
-                    sequentialExecutor.executeKeyQueue(queue, queue.peek());
+                    seqExecutor.executeKeyQueue(queue, queue.peek());
                 });
             } else if (busyThreadCount == 0 && consecutiveFailedCompletes.get() > 6) {
                 log.error("waitUntilComplete failed - discarding {} queues", remainingQueuesCount);

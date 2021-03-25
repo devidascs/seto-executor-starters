@@ -11,7 +11,7 @@ public interface ThrottledExecutor<T> {
      * @param throttleTime amount of time to elapse before a throttle operation is execured
      * @param throttleUnit
      */
-    void throttlexecution(Consumer<T> consumer, T event, String key, int throttleTime, TimeUnit throttleUnit);
+    void throttlExecution(Consumer<T> consumer, T event, String key, int throttleTime, TimeUnit throttleUnit);
 
     /**
      * @return no of executions being throttled

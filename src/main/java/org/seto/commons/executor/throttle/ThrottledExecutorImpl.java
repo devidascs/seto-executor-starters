@@ -59,7 +59,7 @@ public class ThrottledExecutorImpl<T> implements ThrottledExecutor<T> {
      * @param throttleTime amount of time to elapse before a throttle operation is executed
      * @param throttleUnit
      */
-    public void throttlexecution(Consumer<T> consumer, T event, String key, int throttleTime, TimeUnit throttleUnit) {
+    public void throttlExecution(Consumer<T> consumer, T event, String key, int throttleTime, TimeUnit throttleUnit) {
         if (null != key) {
             operationCount++;
             if (operationCount % auditOperationFrequency == 0) {
@@ -78,6 +78,8 @@ public class ThrottledExecutorImpl<T> implements ThrottledExecutor<T> {
             }
             executor.schedule(key, () -> onThrottlingIntervalElapsed(key), throttleTime, throttleUnit);
         }
+        log.info("throttlExecution: callback now for key:{}", key);
+        consumer.accept(event);
     }
 
     /**
@@ -95,12 +97,16 @@ public class ThrottledExecutorImpl<T> implements ThrottledExecutor<T> {
             } else if (null != throttledOperation) {
                 throttleMap.remove(key);
             }
-            if (null != throttledOperation && null != throttledOperation.method) {
-                log.debug("onThrottlingIntervalElapsed: callback for key:{}", key);
-                executor.schedule(key, () -> onThrottlingIntervalElapsed(key), (int) throttledOperation.throttleIntervalMs, TimeUnit.MILLISECONDS);
-            } else {
-                log.warn("onThrottlingIntervalElapsed: operation not found for key:{}", key);
-            }
+        }
+        if (null != throttledOperation && null != throttledOperation.method) {
+            log.debug("onThrottlingIntervalElapsed: callback now for key:{}", key);
+            //Avoid leaking 'emptyOperation' in map for each key
+            executor.schedule(key, () -> onThrottlingIntervalElapsed(key), (int) throttledOperation.throttleIntervalMs, TimeUnit.MILLISECONDS);
+            throttledOperation.method.accept(throttledOperation.arguement);
+        } else if (throttledOperation != null) {
+            log.debug("onThrottlingIntervalElapsed: no new executions requested during throttling intervals for key:{}", key);
+        } else {
+            log.warn("onThrottlingIntervalElapsed: operation not found for key:{}", key);
         }
     }
 
