@@ -141,7 +141,7 @@ public class ExecutorBatchImpl extends CompoundFuture implements ExecutorBatch {
         }
         if (incompleteTaskCount > 0) {
             log.warn("waited:{} ms but failed to complete {} tasks in batch:{} executor:{}",
-                    waitIntervals + timeoutSnapshotMS, incompleteTaskCount, this, this.executor);
+                    waitIntervals * timeoutSnapshotMS, incompleteTaskCount, this, executor);
         }
         return incompleteTaskCount;
     }

@@ -171,7 +171,168 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
         }
         return blockClientThread;
     }
+    public class SequentialExecutor implements Runnable {
+        private SequentialTask getNextTask() {
+            suspendedThreadCount.incrementAndGet();
+            SequentialTask executable = taskQueue.poll();
+            while (isRunning && null == executable) {
+                try {
+                    taskQueue.wait(1000);
+                    executable = taskQueue.poll();
+                } catch (InterruptedException e) {
+                    if (isRunning) {
+                        log.warn("{} worker-thread interrupted and not quitting", name);
+                    } else {
+                        log.warn("{} worker-thread interrupted and  quitting", name);
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+            suspendedThreadCount.decrementAndGet();
+            return executable;
+        }
 
+        @Override
+        public void run() {
+            SequentialTask executable;
+            Queue<SequentialTask> perKeyQueue;
+            while (isRunning) {
+                try {
+                    perKeyQueue = null;
+                    synchronized (taskQueue) {
+                        executable = getNextTask();
+                        if (null == executable) {
+                            continue;
+                        }
+                        if (executable.getKey() != null) {
+                            perKeyQueue = getKeyQueue(executable);
+                        }
+                    }
+                    if (perKeyQueue != null) {
+                        executeKeyQueue(perKeyQueue, executable);
+                    } else if (executable.getKey() == null) {
+                        taskByThreadMap.put(Thread.currentThread().getId(), executable);
+                        executable.execute();
+                    }
+                } catch (Exception e) {
+                    log.error("Exception ", e);
+                } catch (Throwable e) {
+                    log.error("Throwable ", e);
+                }
+            }
+            log.warn("workerThread stopping");
+        }
+
+        /**
+         * Get the keyQueue to execute for the given task
+         * Precondition: synchronized(taskQueue)
+         *
+         * @param executable
+         * @return null if delegate to another thread
+         */
+        private Queue<SequentialTask> getKeyQueue(SequentialTask executable) {
+            String key = executable.getKey();
+            Queue<SequentialTask> perKeyQueue = taskExecutionMap.get(key);
+            if (perKeyQueue == null) {
+                perKeyQueue = new LinkedBlockingDeque<>(maxKeyQueueSize);
+                perKeyQueue.add(executable);
+                taskExecutionMap.put(key, perKeyQueue);
+                return perKeyQueue;
+            }
+            if (perKeyQueue.isEmpty()) {
+                perKeyQueue.add(executable);
+                //Another thread has just finished the main look below but has not removed the map
+                //Should not happen when taskQueue is maintained until handOffKeyQueue is completed
+                log.warn("{} execute: context switch onto key:{} on queue {}", name, key, perKeyQueue.hashCode());
+                return perKeyQueue;
+            }
+            if (!perKeyQueue.offer(executable)) {
+                log.warn("{} execute: ful-buffer: dropping oldest event on key:{} on queue:{} size:{}", name, key,
+                        perKeyQueue.hashCode(), perKeyQueue.size());
+                //Dropping oldest tasks to add new
+                SequentialTask droppedTask = perKeyQueue.remove();
+                if (droppedTask != null) {
+                    droppedTask.completeExceptoinally(REJECTED_EXECUTION_EXCEPTION);
+                }
+                perKeyQueue.add(executable);
+                return perKeyQueue;
+            }
+            return null;
+        }
+
+        /**
+         * executes all task in the perKeyQueue and hand-off when complete
+         *
+         * @param perKeyQueue
+         * @param firstExecutable
+         */
+        private void executeKeyQueue(Queue<SequentialTask> perKeyQueue, SequentialTask firstExecutable) {
+            SequentialTask executable = firstExecutable;
+            String key = executable.getKey();
+            //MAin loop where work is done
+            while (executable != null) {
+                //leave the currently executing task as a singnal that a thread is still active on this key
+                taskByThreadMap.put(Thread.currentThread().getId(), executable);
+                executable.execute();
+                synchronized (taskQueue) {
+                    if (executable == perKeyQueue.peek()) {
+                        perKeyQueue.remove();
+                    } else {
+                        //happens on full buffer when olders task was dropped to add new
+                        log.warn("{} executeAsOwner: full-buffer: on perKeyQueue[{}].size[{}] for key:{} task:{}", name,
+                                perKeyQueue.hashCode(), perKeyQueue.size(), key, executable);
+                    }
+                    executable = perKeyQueue.peek();
+                    if (executable == null) {
+                        handOffKeyQueue(perKeyQueue, key);
+                    }
+                }
+            }
+        }
+
+        /**
+         * removes the perKeyQueue from taskExecutionMap if still the owner
+         * PreCondition: synchronized(taskQueue)  to avoid complex race conditions that are logged as warn
+         *
+         * @param perKeyQueue
+         * @param key
+         */
+        private void handOffKeyQueue(Queue<SequentialTask> perKeyQueue, String key) {
+            SequentialTask executable = perKeyQueue.peek();
+            if (executable == null) {
+                Queue<SequentialTask> currentQ = taskExecutionMap.get(key);
+                if (currentQ == perKeyQueue) {
+                    Queue<SequentialTask> removedQ = taskExecutionMap.remove(key);
+                    if (!removedQ.isEmpty()) {
+                        log.warn(
+                                "{} handOffKeyQueue: perKeyQueue[{}].size[{}] removedQ[{}].size[{}] not empty for key:{}",
+                                name, perKeyQueue.hashCode(), perKeyQueue.size(), removedQ.hashCode(), removedQ.size(),
+                                key);
+                    }
+                    //signal the polling thread in waitUntilComplete
+                    if (taskExecutionMap.isEmpty()) {
+                        taskQueue.notifyAll();
+                    }
+                } else if (currentQ == null) {
+                    //case:2 This thread has been suspended waiting for taskQueue lock and another thread a) took over its
+                    //perKeyQueue in case:1  and b) completed processing ad c) removed perKeyQueue from the map
+                    log.warn("{} handOffKeyQueue: perKeyQueue[{}].size[{}] not found for key:{}", name, perKeyQueue.hashCode(), perKeyQueue
+                            .size(), key);
+                } else {
+                    //case:3 This thread has been suspended waiting for taskQueue lock and another thread completed case:@
+                    //Then a third thread created a new perKeyQueue and has not yet removed the new perKeyQueue
+                    log.warn("{} handOffKeyQueue: perKeyQueue[{}].size[{}] not same as currentQ[{}].size[{}] for key:{}", name, perKeyQueue
+                            .hashCode(), perKeyQueue
+                            .size(), currentQ.hashCode(), currentQ
+                            .size(), key);
+                }
+            } else {
+                //case:1 Another thread added a task to the queue before we got the taskQueue lock
+                //It found an empty perKeyQueue in taskExecutionMap and took charge of executing it
+                log.warn("{} handOffKeyQueue: context switch from key:{} on queue:{}", name, key, perKeyQueue.hashCode());
+            }
+        }
+    }
     @Override
     public ExecutorBatch createBatch() {
         return new ExecutorBatchImpl(this);
@@ -294,168 +455,6 @@ public class SequentialExecutorServiceImpl implements SequentialExecutorService 
         return !isRunning;
     }
 
-    public class SequentialExecutor implements Runnable {
-        private SequentialTask getNextTask() {
-            suspendedThreadCount.incrementAndGet();
-            SequentialTask executable = taskQueue.poll();
-            while (isRunning && null == executable) {
-                try {
-                    taskQueue.wait(1000);
-                    executable = taskQueue.poll();
-                } catch (InterruptedException e) {
-                    if (isRunning) {
-                        log.warn("{} worker-thread interrupted and not quitting", name);
-                    } else {
-                        log.warn("{} worker-thread interrupted and  quitting", name);
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-            suspendedThreadCount.decrementAndGet();
-            return executable;
-        }
-
-        @Override
-        public void run() {
-            SequentialTask executable;
-            Queue<SequentialTask> perKeyQueue;
-            while (isRunning) {
-                try {
-                    perKeyQueue = null;
-                    synchronized (taskQueue) {
-                        executable = getNextTask();
-                        if (null == executable) {
-                            continue;
-                        }
-                        if (executable.getKey() != null) {
-                            perKeyQueue = getKeyQueue(executable);
-                        }
-                    }
-                    if (perKeyQueue != null) {
-                        executeKeyQueue(perKeyQueue, executable);
-                    } else if (executable.getKey() == null) {
-                        taskByThreadMap.put(Thread.currentThread().getId(), executable);
-                        executable.execute();
-                    }
-                } catch (Exception e) {
-                    log.error("Exception ", e);
-                } catch (Throwable e) {
-                    log.error("Throwable ", e);
-                }
-            }
-            log.warn("workerThread stopping");
-        }
-
-        /**
-         * Get the keyQueue to execute for the given task
-         * Precondition: synchronized(taskQueue)
-         *
-         * @param executable
-         * @return null if delegate to another thread
-         */
-        private Queue<SequentialTask> getKeyQueue(SequentialTask executable) {
-            String key = executable.getKey();
-            Queue<SequentialTask> perKeyQueue = taskExecutionMap.get(key);
-            if (perKeyQueue == null) {
-                perKeyQueue = new LinkedBlockingDeque<>(maxKeyQueueSize);
-                perKeyQueue.add(executable);
-                taskExecutionMap.put(key, perKeyQueue);
-                return perKeyQueue;
-            }
-            if (perKeyQueue.isEmpty()) {
-                perKeyQueue.add(executable);
-                //Another thread has just finished the main look below but has not removed the map
-                //Should not happen when taskQueue is maintained until handOffKeyQueue is completed
-                log.warn("{} execute: context switch onto key:{} on queue {}", name, key, perKeyQueue.hashCode());
-                return perKeyQueue;
-            }
-            if (!perKeyQueue.offer(executable)) {
-                log.warn("{} execute: ful-buffer: dropping oldest event on key:{} on queue:{} size:{}", name, key,
-                        perKeyQueue.hashCode(), perKeyQueue.size());
-                //Dropping oldest tasks to add new
-                SequentialTask droppedTask = perKeyQueue.remove();
-                if (droppedTask != null) {
-                    droppedTask.completeExceptoinally(REJECTED_EXECUTION_EXCEPTION);
-                }
-                perKeyQueue.add(executable);
-                //return perKeyQueue;
-            }
-            return null;
-        }
-
-        /**
-         * executes all task in the perKeyQueue and hand-off when complete
-         *
-         * @param perKeyQueue
-         * @param firstExecutable
-         */
-        private void executeKeyQueue(Queue<SequentialTask> perKeyQueue, SequentialTask firstExecutable) {
-            SequentialTask executable = firstExecutable;
-            String key = executable.getKey();
-            //MAin loop where work is done
-            while (executable != null) {
-                //leave the currently executing task as a singnal that a thread is still active on this key
-                taskByThreadMap.put(Thread.currentThread().getId(), executable);
-                executable.execute();
-                synchronized (taskQueue) {
-                    if (executable == perKeyQueue.peek()) {
-                        perKeyQueue.remove();
-                    } else {
-                        //happens on full buffer when olders task was dropped to add new
-                        log.warn("{} executeAsOwner: full-buffer: on perKeyQueue[{}].size[{}] for key:{} task:{}", name,
-                                perKeyQueue.hashCode(), perKeyQueue.size(), key, executable);
-                    }
-                    executable = perKeyQueue.peek();
-                    if (executable == null) {
-                        handOffKeyQueue(perKeyQueue, key);
-                    }
-                }
-            }
-        }
-
-        /**
-         * removes the perKeyQueue from taskExecutionMap if still the owner
-         * PreCondition: synchronized(taskQueue)  to avoid complex race conditions that are logged as warn
-         *
-         * @param perKeyQueue
-         * @param key
-         */
-        private void handOffKeyQueue(Queue<SequentialTask> perKeyQueue, String key) {
-            SequentialTask executable = perKeyQueue.peek();
-            if (executable == null) {
-                Queue<SequentialTask> currentQ = taskExecutionMap.get(key);
-                if (currentQ == perKeyQueue) {
-                    Queue<SequentialTask> removedQ = taskExecutionMap.remove(key);
-                    if (!removedQ.isEmpty()) {
-                        log.warn(
-                                "{} handOffKeyQueue: perKeyQueue[{}].size[{}] removedQ[{}].size[{}] not empty for key:{}",
-                                name, perKeyQueue.hashCode(), perKeyQueue.size(), removedQ.hashCode(), removedQ.size(),
-                                key);
-                    }
-                    //signal the polling thread in waitUntilComplete
-                    if (taskExecutionMap.isEmpty()) {
-                        taskQueue.notifyAll();
-                    }
-                } else if (currentQ == null) {
-                    //case:2 This thread has been suspended waiting for taskQueue lock and another thread a) took over its
-                    //perKeyQueue in case:1  and b) completed processing ad c) removed perKeyQueue from the map
-                    log.warn("{} handOffKeyQueue: perKeyQueue[{}].size[{}] not found for key:{}", name, perKeyQueue.hashCode(), perKeyQueue
-                            .size(), key);
-                } else {
-                    //case:3 This thread has been suspended waiting for taskQueue lock and another thread completed case:@
-                    //Then a third thread created a new perKeyQueue and has not yet removed the new perKeyQueue
-                    log.warn("{} handOffKeyQueue: perKeyQueue[{}].size[{}] not same as currentQ[{}].size[{}] for key:{}", name, perKeyQueue
-                            .hashCode(), perKeyQueue
-                            .size(), currentQ.hashCode(), currentQ
-                            .size(), key);
-                }
-            } else {
-                //case:1 Another thread added a task to the queue before we got the taskQueue lock
-                //It found an empty perKeyQueue in taskExecutionMap and took charge of executing it
-                log.warn("{} handOffKeyQueue: context switch from key:{} on queue:{}", name, key, perKeyQueue.hashCode());
-            }
-        }
-    }
 
     @Override
     public String toString() {
